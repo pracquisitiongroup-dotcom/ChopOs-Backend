@@ -3,7 +3,7 @@
  * ------------------------------------------------------------------
  * This is what makes "Ask Chop anything" real instead of a canned
  * demo conversation. It:
- *   1. Checks this business hasn't used up its monthly token allowance
+ *   1. Checks this business hasn't gone over its monthly $ budget
  *   2. Pulls what's actually known about the business (pinned
  *      memories, Train Chop answers, a snapshot of live GHL leads)
  *   3. Builds a system prompt out of that context
@@ -12,9 +12,13 @@
  *
  * Body: { "message": "who should I call today?", "history"?: [...] }
  * Env vars needed:
- *   ANTHROPIC_API_KEY   (from console.anthropic.com)
- *   MONTHLY_TOKEN_LIMIT (optional, defaults to 300000 — total input+output
- *                        tokens allowed per business per calendar month)
+ *   ANTHROPIC_API_KEY        (from console.anthropic.com)
+ *   MONTHLY_SPEND_LIMIT_USD  (optional, defaults to 10 — max $ per business
+ *                             per calendar month before Chop pauses replies)
+ *   SONNET_INPUT_COST_PER_MTOK / SONNET_OUTPUT_COST_PER_MTOK (optional —
+ *                             only needed once Anthropic's Sonnet 5 pricing
+ *                             changes on Sept 1, 2026; defaults to the
+ *                             current intro rate, $2 / $10 per million)
  * ------------------------------------------------------------------
  */
 
@@ -23,9 +27,15 @@ import { supabase, DEFAULT_BUSINESS_ID } from "../lib/supabase";
 import { fetchGhlLeads } from "../adapters/ghl";
 
 const CLAUDE_MODEL = "claude-sonnet-5";
-const DEFAULT_MONTHLY_LIMIT = 300000; // total tokens (input+output combined)
 
-async function getMonthlyUsage(): Promise<number> {
+// Sonnet 5 pricing per token (introductory rate through Aug 31, 2026).
+// Standard rate from Sept 1, 2026 is $3/$15 per million — update these two
+// via env vars then, no code change needed.
+const INPUT_COST_PER_TOKEN = Number(process.env.SONNET_INPUT_COST_PER_MTOK || 2) / 1_000_000;
+const OUTPUT_COST_PER_TOKEN = Number(process.env.SONNET_OUTPUT_COST_PER_MTOK || 10) / 1_000_000;
+const DEFAULT_MONTHLY_SPEND_LIMIT_USD = 10;
+
+async function getMonthlySpendUsd(): Promise<number> {
   const startOfMonth = new Date();
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
@@ -41,7 +51,8 @@ async function getMonthlyUsage(): Promise<number> {
     return 0;
   }
   return (data || []).reduce(
-    (sum, row) => sum + (row.input_tokens || 0) + (row.output_tokens || 0),
+    (sum, row) =>
+      sum + (row.input_tokens || 0) * INPUT_COST_PER_TOKEN + (row.output_tokens || 0) * OUTPUT_COST_PER_TOKEN,
     0
   );
 }
@@ -117,16 +128,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: "Body must include message" });
     }
 
-    // ---- Quota check — stops one business's usage from becoming an open-ended bill ----
-    const monthlyLimit = Number(process.env.MONTHLY_TOKEN_LIMIT) || DEFAULT_MONTHLY_LIMIT;
-    const usedThisMonth = await getMonthlyUsage();
-    if (usedThisMonth >= monthlyLimit) {
+    // ---- Quota check — caps real spend, not a rough token guess ----
+    const monthlyLimitUsd = Number(process.env.MONTHLY_SPEND_LIMIT_USD) || DEFAULT_MONTHLY_SPEND_LIMIT_USD;
+    const spentThisMonth = await getMonthlySpendUsd();
+    if (spentThisMonth >= monthlyLimitUsd) {
       return res.status(200).json({
         reply:
-          "Chop has used up its AI allowance for this month. Usage resets at the start of next month, or you can upgrade for more.",
+          "Chop has used up its AI budget for this month. Usage resets at the start of next month, or you can upgrade for more.",
         quotaExceeded: true,
-        usedThisMonth,
-        monthlyLimit,
+        spentThisMonth: Number(spentThisMonth.toFixed(4)),
+        monthlyLimitUsd,
       });
     }
 
@@ -179,8 +190,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       reply,
-      usedThisMonth: usedThisMonth + inputTokens + outputTokens,
-      monthlyLimit,
+      spentThisMonth: Number((spentThisMonth + inputTokens * INPUT_COST_PER_TOKEN + outputTokens * OUTPUT_COST_PER_TOKEN).toFixed(4)),
+      monthlyLimitUsd,
     });
   } catch (err: any) {
     console.error("[/api/chat] error:", err);
