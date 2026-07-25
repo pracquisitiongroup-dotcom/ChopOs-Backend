@@ -1,52 +1,55 @@
 /**
- * GET /api/leads
+ * CANONICAL MODELS
  * ------------------------------------------------------------------
- * This is what your ChopOS frontend calls. It never talks to GHL
- * directly (the private token must never reach the browser).
+ * This is the one shape ChopOS's dashboard, AI, and automations ever
+ * talk to. It never changes based on which CRM the data came from.
  *
- * Deploy target: Vercel serverless function.
- * Env vars needed (set in Vercel project settings, not in code):
- *   GHL_PRIVATE_TOKEN
- *   GHL_LOCATION_ID
- *   ALLOWED_ORIGIN   (e.g. https://funny-lolly-416bc5.netlify.app)
+ * Every CRM adapter (ghl.ts, hubspot.ts, salesforce.ts, ...) has one
+ * job: take that CRM's weird API shape and map it into THESE types.
+ * Nothing else in the app should ever import a CRM-specific type.
  * ------------------------------------------------------------------
  */
 
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { fetchGhlLeads } from "../adapters/ghl";
+export type LeadStatus =
+  | "new"
+  | "contacted"
+  | "quoted"
+  | "won"
+  | "lost"
+  | "cold";
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Frontend (Netlify) and backend (Vercel) live on different domains,
-  // so the browser blocks the request unless we explicitly allow it here.
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
-
-  try {
-    const privateToken = process.env.GHL_PRIVATE_TOKEN;
-    const locationId = process.env.GHL_LOCATION_ID;
-
-    if (!privateToken || !locationId) {
-      return res.status(500).json({
-        error: "Missing GHL_PRIVATE_TOKEN or GHL_LOCATION_ID environment variables",
-      });
-    }
-
-    // ---- Today: single CRM, hardcoded. ----
-    // ---- Tomorrow: look up which CRM this business connected via
-    //      ChopLink, and call that adapter instead. Same return shape
-    //      either way, so the frontend and the AI never need to know. ----
-    const leads = await fetchGhlLeads({ privateToken, locationId }, { limit: 100 });
-
-    return res.status(200).json({ leads });
-  } catch (err: any) {
-    console.error("[/api/leads] error:", err);
-    return res.status(500).json({ error: err.message || "Unknown error" });
-  }
+export interface CanonicalLead {
+  id: string;              // ChopOS's own id, not the CRM's id
+  sourceCrm: "gohighlevel" | "hubspot" | "salesforce" | "servicetitan" | "jobber" | "housecallpro" | "pipedrive";
+  sourceId: string;         // the id inside that CRM, kept for write-back
+  name: string;
+  email?: string;
+  phone?: string;
+  status: LeadStatus;
+  estimatedValue?: number;  // dollars
+  createdAt: string;        // ISO date
+  lastContactedAt?: string; // ISO date
+  tags: string[];
+  raw: Record<string, unknown>; // original CRM payload, for debugging only — never read by the UI
 }
 
+export interface CanonicalOpportunity {
+  id: string;
+  sourceCrm: CanonicalLead["sourceCrm"];
+  sourceId: string;
+  leadId: string;
+  stage: string;            // normalized pipeline stage name
+  value: number;
+  probability?: number;     // 0-100
+  createdAt: string;
+}
+
+export interface CanonicalAppointment {
+  id: string;
+  sourceCrm: CanonicalLead["sourceCrm"];
+  sourceId: string;
+  leadId?: string;
+  title: string;
+  startsAt: string;
+  endsAt: string;
+}
