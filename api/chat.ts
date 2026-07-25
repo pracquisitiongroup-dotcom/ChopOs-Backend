@@ -4,6 +4,9 @@
  * This is what makes "Ask Chop anything" real instead of a canned
  * demo conversation. It:
  *   1. Checks this business hasn't gone over its monthly $ budget
+ *      (enforced in real dollars, but surfaced to the frontend as a
+ *      TOKEN count — see DISPLAY_TOKEN_WEIGHT below — so raw cost/
+ *      margin is never exposed to the business owner)
  *   2. Pulls what's actually known about the business (pinned
  *      memories, Train Chop answers, a snapshot of live GHL leads)
  *   3. Builds a system prompt out of that context
@@ -11,10 +14,14 @@
  *   5. Logs both sides — INCLUDING real token usage — to chat_messages
  *
  * Body: { "message": "who should I call today?", "history"?: [...] }
+ * Response includes: { reply, tokensUsedThisMonth, monthlyTokenLimit }
+ * — no dollar figures are ever returned to the frontend.
+ *
  * Env vars needed:
  *   ANTHROPIC_API_KEY        (from console.anthropic.com)
  *   MONTHLY_SPEND_LIMIT_USD  (optional, defaults to 10 — max $ per business
- *                             per calendar month before Chop pauses replies)
+ *                             per calendar month before Chop pauses replies;
+ *                             this is your real cost cap, never shown to users)
  *   SONNET_INPUT_COST_PER_MTOK / SONNET_OUTPUT_COST_PER_MTOK (optional —
  *                             only needed once Anthropic's Sonnet 5 pricing
  *                             changes on Sept 1, 2026; defaults to the
@@ -35,7 +42,21 @@ const INPUT_COST_PER_TOKEN = Number(process.env.SONNET_INPUT_COST_PER_MTOK || 2)
 const OUTPUT_COST_PER_TOKEN = Number(process.env.SONNET_OUTPUT_COST_PER_MTOK || 10) / 1_000_000;
 const DEFAULT_MONTHLY_SPEND_LIMIT_USD = 10;
 
-async function getMonthlySpendUsd(): Promise<number> {
+// ---- Display tokens: what the business owner actually sees ----
+// Real enforcement below is always in dollars (accurate, protects your margin).
+// But showing a $ figure to the customer exposes your raw cost, so instead we
+// show a "token" number in OUR units — weighted the same as real pricing, so
+// it behaves consistently no matter the input/output mix. Since output costs
+// 5x input, 1 output token "counts" as 5 of these display tokens. That ratio
+// (currently 5x) has held across every Anthropic pricing tier, including the
+// Sept 1 change, so this weighting shouldn't need touching even when the
+// underlying $ rates do.
+const DISPLAY_TOKEN_WEIGHT = OUTPUT_COST_PER_TOKEN / INPUT_COST_PER_TOKEN;
+function toDisplayTokens(inputTokens: number, outputTokens: number): number {
+  return Math.round(inputTokens + outputTokens * DISPLAY_TOKEN_WEIGHT);
+}
+
+async function getMonthlyUsage(): Promise<{ spendUsd: number; displayTokens: number }> {
   const startOfMonth = new Date();
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
@@ -48,13 +69,19 @@ async function getMonthlySpendUsd(): Promise<number> {
 
   if (error) {
     console.warn("[/api/chat] usage lookup failed, allowing request:", error);
-    return 0;
+    return { spendUsd: 0, displayTokens: 0 };
   }
-  return (data || []).reduce(
-    (sum, row) =>
-      sum + (row.input_tokens || 0) * INPUT_COST_PER_TOKEN + (row.output_tokens || 0) * OUTPUT_COST_PER_TOKEN,
-    0
+  const totals = (data || []).reduce(
+    (acc, row) => ({
+      inputTokens: acc.inputTokens + (row.input_tokens || 0),
+      outputTokens: acc.outputTokens + (row.output_tokens || 0),
+    }),
+    { inputTokens: 0, outputTokens: 0 }
   );
+  return {
+    spendUsd: totals.inputTokens * INPUT_COST_PER_TOKEN + totals.outputTokens * OUTPUT_COST_PER_TOKEN,
+    displayTokens: toDisplayTokens(totals.inputTokens, totals.outputTokens),
+  };
 }
 
 async function buildContext(): Promise<string> {
@@ -128,16 +155,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: "Body must include message" });
     }
 
-    // ---- Quota check — caps real spend, not a rough token guess ----
+    // ---- Quota check — real enforcement is dollars, display is tokens ----
     const monthlyLimitUsd = Number(process.env.MONTHLY_SPEND_LIMIT_USD) || DEFAULT_MONTHLY_SPEND_LIMIT_USD;
-    const spentThisMonth = await getMonthlySpendUsd();
-    if (spentThisMonth >= monthlyLimitUsd) {
+    const monthlyTokenLimit = Math.round(monthlyLimitUsd / INPUT_COST_PER_TOKEN);
+    const usage = await getMonthlyUsage();
+    if (usage.spendUsd >= monthlyLimitUsd) {
       return res.status(200).json({
         reply:
-          "Chop has used up its AI budget for this month. Usage resets at the start of next month, or you can upgrade for more.",
+          "Chop has used up its AI tokens for this month. Usage resets at the start of next month, or you can upgrade for more.",
         quotaExceeded: true,
-        spentThisMonth: Number(spentThisMonth.toFixed(4)),
-        monthlyLimitUsd,
+        tokensUsedThisMonth: usage.displayTokens,
+        monthlyTokenLimit,
       });
     }
 
@@ -190,8 +218,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return res.status(200).json({
       reply,
-      spentThisMonth: Number((spentThisMonth + inputTokens * INPUT_COST_PER_TOKEN + outputTokens * OUTPUT_COST_PER_TOKEN).toFixed(4)),
-      monthlyLimitUsd,
+      tokensUsedThisMonth: usage.displayTokens + toDisplayTokens(inputTokens, outputTokens),
+      monthlyTokenLimit,
     });
   } catch (err: any) {
     console.error("[/api/chat] error:", err);
