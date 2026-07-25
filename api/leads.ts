@@ -1,55 +1,39 @@
 /**
- * CANONICAL MODELS
+ * GET /api/leads
  * ------------------------------------------------------------------
- * This is the one shape ChopOS's dashboard, AI, and automations ever
- * talk to. It never changes based on which CRM the data came from.
- *
- * Every CRM adapter (ghl.ts, hubspot.ts, salesforce.ts, ...) has one
- * job: take that CRM's weird API shape and map it into THESE types.
- * Nothing else in the app should ever import a CRM-specific type.
+ * This is what your ChopOS frontend calls. It never talks to GHL
+ * directly (the private token must never reach the browser).
  * ------------------------------------------------------------------
  */
 
-export type LeadStatus =
-  | "new"
-  | "contacted"
-  | "quoted"
-  | "won"
-  | "lost"
-  | "cold";
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { fetchGhlLeads } from "../adapters/ghl";
 
-export interface CanonicalLead {
-  id: string;              // ChopOS's own id, not the CRM's id
-  sourceCrm: "gohighlevel" | "hubspot" | "salesforce" | "servicetitan" | "jobber" | "housecallpro" | "pipedrive";
-  sourceId: string;         // the id inside that CRM, kept for write-back
-  name: string;
-  email?: string;
-  phone?: string;
-  status: LeadStatus;
-  estimatedValue?: number;  // dollars
-  createdAt: string;        // ISO date
-  lastContactedAt?: string; // ISO date
-  tags: string[];
-  raw: Record<string, unknown>; // original CRM payload, for debugging only — never read by the UI
-}
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-export interface CanonicalOpportunity {
-  id: string;
-  sourceCrm: CanonicalLead["sourceCrm"];
-  sourceId: string;
-  leadId: string;
-  stage: string;            // normalized pipeline stage name
-  value: number;
-  probability?: number;     // 0-100
-  createdAt: string;
-}
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
 
-export interface CanonicalAppointment {
-  id: string;
-  sourceCrm: CanonicalLead["sourceCrm"];
-  sourceId: string;
-  leadId?: string;
-  title: string;
-  startsAt: string;
-  endsAt: string;
+  try {
+    const privateToken = process.env.GHL_PRIVATE_TOKEN;
+    const locationId = process.env.GHL_LOCATION_ID;
+
+    if (!privateToken || !locationId) {
+      return res.status(500).json({
+        error: "Missing GHL_PRIVATE_TOKEN or GHL_LOCATION_ID environment variables",
+      });
+    }
+
+    const leads = await fetchGhlLeads({ privateToken, locationId }, { limit: 100 });
+
+    return res.status(200).json({ leads });
+  } catch (err: any) {
+    console.error("[/api/leads] error:", err);
+    return res.status(500).json({ error: err.message || "Unknown error" });
+  }
 }
