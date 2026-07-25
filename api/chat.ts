@@ -1,62 +1,45 @@
 /**
  * /api/chat
  * ------------------------------------------------------------------
- * This is what makes "Ask Chop anything" real instead of a canned
- * demo conversation. It:
+ * "Ask Chop anything" — now business-scoped. Requires a logged-in
+ * user; pulls that specific business's memories, training answers,
+ * GHL credentials, and live leads — nobody sees another business's data.
  *   1. Checks this business hasn't gone over its monthly $ budget
  *      (enforced in real dollars, but surfaced to the frontend as a
- *      TOKEN count — see DISPLAY_TOKEN_WEIGHT below — so raw cost/
- *      margin is never exposed to the business owner)
- *   2. Pulls what's actually known about the business (pinned
- *      memories, Train Chop answers, a snapshot of live GHL leads)
- *   3. Builds a system prompt out of that context
- *   4. Sends the conversation to Claude
- *   5. Logs both sides — INCLUDING real token usage — to chat_messages
+ *      TOKEN count so raw cost/margin is never exposed to the owner)
+ *   2. Pulls what's known about the business (memories, training,
+ *      live GHL leads)
+ *   3. Sends the conversation to Claude
+ *   4. Logs both sides — including real token usage — to chat_messages
  *
  * Body: { "message": "who should I call today?", "history"?: [...] }
- * Response includes: { reply, tokensUsedThisMonth, monthlyTokenLimit }
+ * Response: { reply, tokensUsedThisMonth, monthlyTokenLimit }
  * — no dollar figures are ever returned to the frontend.
  *
  * Env vars needed:
  *   ANTHROPIC_API_KEY        (from console.anthropic.com)
- *   MONTHLY_SPEND_LIMIT_USD  (optional, defaults to 10 — max $ per business
- *                             per calendar month before Chop pauses replies;
- *                             this is your real cost cap, never shown to users)
- *   SONNET_INPUT_COST_PER_MTOK / SONNET_OUTPUT_COST_PER_MTOK (optional —
- *                             only needed once Anthropic's Sonnet 5 pricing
- *                             changes on Sept 1, 2026; defaults to the
- *                             current intro rate, $2 / $10 per million)
+ *   MONTHLY_SPEND_LIMIT_USD  (optional, defaults to 10)
+ *   SONNET_INPUT_COST_PER_MTOK / SONNET_OUTPUT_COST_PER_MTOK (optional)
  * ------------------------------------------------------------------
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { supabase, DEFAULT_BUSINESS_ID } from "../lib/supabase";
+import { supabase } from "../lib/supabase";
+import { getAuthedBusiness } from "../lib/auth";
 import { fetchGhlLeads } from "../adapters/ghl";
 
 const CLAUDE_MODEL = "claude-sonnet-5";
 
-// Sonnet 5 pricing per token (introductory rate through Aug 31, 2026).
-// Standard rate from Sept 1, 2026 is $3/$15 per million — update these two
-// via env vars then, no code change needed.
 const INPUT_COST_PER_TOKEN = Number(process.env.SONNET_INPUT_COST_PER_MTOK || 2) / 1_000_000;
 const OUTPUT_COST_PER_TOKEN = Number(process.env.SONNET_OUTPUT_COST_PER_MTOK || 10) / 1_000_000;
 const DEFAULT_MONTHLY_SPEND_LIMIT_USD = 10;
 
-// ---- Display tokens: what the business owner actually sees ----
-// Real enforcement below is always in dollars (accurate, protects your margin).
-// But showing a $ figure to the customer exposes your raw cost, so instead we
-// show a "token" number in OUR units — weighted the same as real pricing, so
-// it behaves consistently no matter the input/output mix. Since output costs
-// 5x input, 1 output token "counts" as 5 of these display tokens. That ratio
-// (currently 5x) has held across every Anthropic pricing tier, including the
-// Sept 1 change, so this weighting shouldn't need touching even when the
-// underlying $ rates do.
 const DISPLAY_TOKEN_WEIGHT = OUTPUT_COST_PER_TOKEN / INPUT_COST_PER_TOKEN;
 function toDisplayTokens(inputTokens: number, outputTokens: number): number {
   return Math.round(inputTokens + outputTokens * DISPLAY_TOKEN_WEIGHT);
 }
 
-async function getMonthlyUsage(): Promise<{ spendUsd: number; displayTokens: number }> {
+async function getMonthlyUsage(businessId: string): Promise<{ spendUsd: number; displayTokens: number }> {
   const startOfMonth = new Date();
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
@@ -64,7 +47,7 @@ async function getMonthlyUsage(): Promise<{ spendUsd: number; displayTokens: num
   const { data, error } = await supabase
     .from("chat_messages")
     .select("input_tokens, output_tokens")
-    .eq("business_id", DEFAULT_BUSINESS_ID)
+    .eq("business_id", businessId)
     .gte("created_at", startOfMonth.toISOString());
 
   if (error) {
@@ -84,17 +67,11 @@ async function getMonthlyUsage(): Promise<{ spendUsd: number; displayTokens: num
   };
 }
 
-async function buildContext(): Promise<string> {
-  const [{ data: memories }, { data: trainingRows }] = await Promise.all([
-    supabase
-      .from("memories")
-      .select("text, category, pinned")
-      .eq("business_id", DEFAULT_BUSINESS_ID)
-      .order("pinned", { ascending: false }),
-    supabase
-      .from("training_answers")
-      .select("step, field_key, value")
-      .eq("business_id", DEFAULT_BUSINESS_ID),
+async function buildContext(businessId: string): Promise<string> {
+  const [{ data: memories }, { data: trainingRows }, { data: business }] = await Promise.all([
+    supabase.from("memories").select("text, category, pinned").eq("business_id", businessId).order("pinned", { ascending: false }),
+    supabase.from("training_answers").select("step, field_key, value").eq("business_id", businessId),
+    supabase.from("businesses").select("ghl_private_token, ghl_location_id").eq("id", businessId).single(),
   ]);
 
   const memoryLines = (memories || [])
@@ -108,10 +85,11 @@ async function buildContext(): Promise<string> {
 
   let leadsSummary = "No live CRM data available right now.";
   try {
-    const privateToken = process.env.GHL_PRIVATE_TOKEN;
-    const locationId = process.env.GHL_LOCATION_ID;
-    if (privateToken && locationId) {
-      const leads = await fetchGhlLeads({ privateToken, locationId }, { limit: 30 });
+    if (business?.ghl_private_token && business?.ghl_location_id) {
+      const leads = await fetchGhlLeads(
+        { privateToken: business.ghl_private_token, locationId: business.ghl_location_id },
+        { limit: 30 }
+      );
       leadsSummary = leads
         .slice(0, 15)
         .map((l) => `- ${l.name} · status: ${l.status} · value: ${l.estimatedValue ?? "unknown"}`)
@@ -140,11 +118,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Use POST" });
 
   try {
+    const auth = await getAuthedBusiness(req);
+    if (!auth) return res.status(401).json({ error: "Not authenticated" });
+    const businessId = auth.businessId;
+
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return res.status(500).json({ error: "Missing ANTHROPIC_API_KEY environment variable" });
@@ -155,26 +137,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: "Body must include message" });
     }
 
-    // ---- Quota check — real enforcement is dollars, display is tokens ----
     const monthlyLimitUsd = Number(process.env.MONTHLY_SPEND_LIMIT_USD) || DEFAULT_MONTHLY_SPEND_LIMIT_USD;
     const monthlyTokenLimit = Math.round(monthlyLimitUsd / INPUT_COST_PER_TOKEN);
-    const usage = await getMonthlyUsage();
+    const usage = await getMonthlyUsage(businessId);
     if (usage.spendUsd >= monthlyLimitUsd) {
       return res.status(200).json({
-        reply:
-          "Chop has used up its AI tokens for this month. Usage resets at the start of next month, or you can upgrade for more.",
+        reply: "Chop has used up its AI tokens for this month. Usage resets at the start of next month, or you can upgrade for more.",
         quotaExceeded: true,
         tokensUsedThisMonth: usage.displayTokens,
         monthlyTokenLimit,
       });
     }
 
-    const systemPrompt = await buildContext();
-
-    const messages = [
-      ...(Array.isArray(history) ? history : []),
-      { role: "user", content: message },
-    ];
+    const systemPrompt = await buildContext(businessId);
+    const messages = [...(Array.isArray(history) ? history : []), { role: "user", content: message }];
 
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -183,12 +159,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 800,
-        system: systemPrompt,
-        messages,
-      }),
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 800, system: systemPrompt, messages }),
     });
 
     if (!claudeRes.ok) {
@@ -205,12 +176,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const inputTokens = claudeData.usage?.input_tokens || 0;
     const outputTokens = claudeData.usage?.output_tokens || 0;
 
-    // Log both sides with real token usage — best-effort, don't fail the request if this errors
     supabase
       .from("chat_messages")
       .insert([
-        { business_id: DEFAULT_BUSINESS_ID, role: "user", content: message, input_tokens: inputTokens, output_tokens: 0 },
-        { business_id: DEFAULT_BUSINESS_ID, role: "assistant", content: reply, input_tokens: 0, output_tokens: outputTokens },
+        { business_id: businessId, role: "user", content: message, input_tokens: inputTokens, output_tokens: 0 },
+        { business_id: businessId, role: "assistant", content: reply, input_tokens: 0, output_tokens: outputTokens },
       ])
       .then(({ error }) => {
         if (error) console.warn("[/api/chat] failed to log messages:", error);
