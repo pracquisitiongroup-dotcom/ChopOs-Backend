@@ -2,39 +2,38 @@
  * /api/training
  * ------------------------------------------------------------------
  * Backs the Train Chop wizard. Supports:
- *   GET  /api/training           -> { answers: { "1.businessName": "...", ... } }
+ *   GET  /api/training           -> { answers: { "1.field_0": "...", ... } }
  *   POST /api/training  { step, answers: { fieldKey: value, ... } }
- *        -> saves/updates every field for that step in one call
  *
- * Reads are open. Writes need the x-chopos-secret header, same as
- * every other write-endpoint in this app.
+ * Every request now requires a logged-in user — retired the old shared
+ * ACTION_SECRET. Data is scoped to whichever business the logged-in
+ * user belongs to.
  * ------------------------------------------------------------------
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { supabase, DEFAULT_BUSINESS_ID } from "../lib/supabase";
-
-function checkSecret(req: VercelRequest): boolean {
-  const provided = req.headers["x-chopos-secret"];
-  return !!process.env.ACTION_SECRET && provided === process.env.ACTION_SECRET;
-}
+import { supabase } from "../lib/supabase";
+import { getAuthedBusiness } from "../lib/auth";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-chopos-secret");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  const auth = await getAuthedBusiness(req);
+  if (!auth) return res.status(401).json({ error: "Not authenticated" });
+  const businessId = auth.businessId;
 
   try {
     if (req.method === "GET") {
       const { data, error } = await supabase
         .from("training_answers")
         .select("step, field_key, value")
-        .eq("business_id", DEFAULT_BUSINESS_ID);
+        .eq("business_id", businessId);
       if (error) throw error;
 
-      // Flatten into { "1.businessName": "P&R Moving Co.", ... } for easy frontend use
       const answers: Record<string, string> = {};
       (data || []).forEach((row) => {
         answers[`${row.step}.${row.field_key}`] = row.value ?? "";
@@ -43,14 +42,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (req.method === "POST") {
-      if (!checkSecret(req)) return res.status(401).json({ error: "Unauthorized" });
       const { step, answers } = req.body || {};
       if (typeof step !== "number" || !answers || typeof answers !== "object") {
         return res.status(400).json({ error: "Body must include step (number) and answers (object)" });
       }
 
       const rows = Object.entries(answers).map(([field_key, value]) => ({
-        business_id: DEFAULT_BUSINESS_ID,
+        business_id: businessId,
         step,
         field_key,
         value: String(value),
