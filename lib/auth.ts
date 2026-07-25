@@ -23,6 +23,21 @@ export interface AuthedContext {
   role: "owner" | "member";
 }
 
+/**
+ * Verifies the session token and returns just the user id — no business
+ * lookup. Used by endpoints that run BEFORE a business exists yet, like
+ * signup-business.ts (a brand-new account has no business_members row).
+ */
+export async function getAuthedUser(req: VercelRequest): Promise<{ userId: string } | null> {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return null;
+
+  const { data: userData, error } = await supabase.auth.getUser(token);
+  if (error || !userData?.user) return null;
+  return { userId: userData.user.id };
+}
+
 export async function getAuthedBusiness(req: VercelRequest): Promise<AuthedContext | null> {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
