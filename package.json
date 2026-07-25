@@ -6,7 +6,8 @@
     "dev": "vercel dev"
   },
   "dependencies": {
-    "@vercel/node": "^3.0.0"
+    "@vercel/node": "^3.0.0",
+    "@supabase/supabase-js": "^2.45.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
