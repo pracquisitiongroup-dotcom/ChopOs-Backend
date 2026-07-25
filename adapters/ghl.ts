@@ -103,3 +103,36 @@ export async function fetchGhlLeads(
  * Add the matching *.write scopes only once ChopOS is actually taking
  * actions (sending follow-ups, booking appointments) on the owner's behalf.
  */
+
+/**
+ * Sends a real SMS to a contact through GHL's conversations API.
+ * This is a WRITE action — requires the `conversations.write` scope
+ * on your Private Integration token (add it in GHL: Settings ->
+ * Private Integrations -> edit your token -> add scope).
+ *
+ * contactId must be a real GHL contact id (CanonicalLead.sourceId),
+ * not the ChopOS-prefixed CanonicalLead.id.
+ */
+export async function sendGhlSms(
+  config: GHLConfig,
+  contactId: string,
+  message: string
+): Promise<{ success: true; messageId?: string }> {
+  const res = await fetch(`${GHL_BASE_URL}/conversations/messages`, {
+    method: "POST",
+    headers: ghlHeaders(config),
+    body: JSON.stringify({
+      type: "SMS",
+      contactId,
+      message,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GHL send message failed (${res.status}): ${body}`);
+  }
+
+  const data = await res.json();
+  return { success: true, messageId: data.messageId };
+}
