@@ -6,7 +6,13 @@
  * the old shared ACTION_SECRET password is retired now that real
  * per-user login exists.
  *
- * Body: { "contactId": "wLFXrbz5bg7RptiTb3Hr", "message": "Hi ..." }
+ * Body: { "contactId": "wLFXrbz5bg7RptiTb3Hr", "message": "Hi ...", "estimatedValue"?: 2450 }
+ *
+ * `estimatedValue` is optional — if the frontend has it (from the
+ * lead's GHL data), it gets logged to chop_actions_log as "pipeline
+ * value touched by this follow-up." This is NOT a claim that Chop
+ * caused a sale — just an honest record of what was in play when the
+ * action happened, for the impact tracker on the dashboard.
  * ------------------------------------------------------------------
  */
 
@@ -28,7 +34,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const auth = await getAuthedBusiness(req);
     if (!auth) return res.status(401).json({ error: "Not authenticated" });
 
-    const { contactId, message } = req.body || {};
+    const { contactId, message, estimatedValue } = req.body || {};
     if (!contactId || !message) {
       return res.status(400).json({ error: "Body must include contactId and message" });
     }
@@ -50,6 +56,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       contactId,
       message
     );
+
+    // Log the real impact — best-effort, never blocks the actual response.
+    supabase
+      .from("chop_actions_log")
+      .insert({
+        business_id: auth.businessId,
+        action_type: "follow_up_sent",
+        minutes_saved: 5, // a defensible estimate: time to look up, compose, and send a personalized text by hand
+        dollar_value: typeof estimatedValue === "number" ? estimatedValue : null,
+      })
+      .then(({ error }) => {
+        if (error) console.warn("[/api/send-followup] impact log failed:", error);
+      });
+
     return res.status(200).json(result);
   } catch (err: any) {
     console.error("[/api/send-followup] error:", err);
