@@ -38,9 +38,11 @@ export interface CanonicalOpportunity {
   sourceCrm: CanonicalLead["sourceCrm"];
   sourceId: string;
   leadId: string;
-  stage: string;            // normalized pipeline stage name
+  name: string;          // the opportunity's actual title/name from the CRM
+  stage: string;
+  status: string;        // open | won | lost | abandoned
   value: number;
-  probability?: number;     // 0-100
+  probability?: number;
   createdAt: string;
 }
 
