@@ -149,7 +149,13 @@ function mapGhlOpportunity(ghlOpp: any) {
     sourceCrm: "gohighlevel" as const,
     sourceId: ghlOpp.id,
     leadId: ghlOpp.contactId || "",
-    stage: ghlOpp.pipelineStageId || ghlOpp.status || "unknown",
+    name: ghlOpp.name || "Unnamed Opportunity",
+    stage: ghlOpp.pipelineStageId || "unknown", // raw GHL stage id — resolving this to a
+    // real readable stage name needs a separate call to GHL's Pipelines endpoint,
+    // which isn't wired up yet. Don't try to prettify this id into fake words —
+    // that's what caused the garbled text bug. Use `status` below instead for
+    // a clean, always-readable field.
+    status: ghlOpp.status || "open", // confirmed real values: open | won | lost | abandoned
     value: Number(ghlOpp.monetaryValue) || 0,
     probability: undefined,
     createdAt: ghlOpp.createdAt || new Date().toISOString(),
