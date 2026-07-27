@@ -136,3 +136,100 @@ export async function sendGhlSms(
   const data = await res.json();
   return { success: true, messageId: data.messageId };
 }
+
+/**
+ * OPPORTUNITIES (Revenue / pipeline page)
+ * ------------------------------------------------------------------
+ * Confirmed real endpoint: GET /opportunities/search
+ * Same base URL, same Bearer + Version header auth as everything else.
+ */
+function mapGhlOpportunity(ghlOpp: any) {
+  return {
+    id: `ghl_opp_${ghlOpp.id}`,
+    sourceCrm: "gohighlevel" as const,
+    sourceId: ghlOpp.id,
+    leadId: ghlOpp.contactId || "",
+    stage: ghlOpp.pipelineStageId || ghlOpp.status || "unknown",
+    value: Number(ghlOpp.monetaryValue) || 0,
+    probability: undefined,
+    createdAt: ghlOpp.createdAt || new Date().toISOString(),
+  };
+}
+
+export async function fetchGhlOpportunities(
+  config: GHLConfig,
+  options?: { limit?: number }
+) {
+  const params = new URLSearchParams({
+    locationId: config.locationId,
+    limit: String(options?.limit ?? 50),
+  });
+  const res = await fetch(`${GHL_BASE_URL}/opportunities/search?${params.toString()}`, {
+    method: "GET",
+    headers: ghlHeaders(config),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GHL opportunities/search failed (${res.status}): ${body}`);
+  }
+
+  const data = await res.json();
+  const opportunities = data.opportunities || [];
+  return opportunities.map(mapGhlOpportunity);
+}
+
+/**
+ * SOCIAL PLANNER (Google Business Profile posting)
+ * ------------------------------------------------------------------
+ * GHL's Social Planner API can post to a business's connected GBP
+ * listing through the SAME Private Integration Token — no separate
+ * Google OAuth needed, as long as the business has already connected
+ * their Google Business Profile as a channel inside GHL itself.
+ *
+ * Confirmed real endpoints from GHL's docs:
+ *   GET  /social-media-posting/oauth/:locationId/accounts  (list connected channels)
+ *   POST /social-media-posting/:locationId/posts            (create a post)
+ *
+ * NOTE: GHL's public docs render their request-body schema as an
+ * interactive JS table that isn't visible in plain-text fetches, so
+ * the exact field names below (accountIds, summary) are my best
+ * informed guess based on their written description, not a confirmed
+ * schema. If the first real post fails, check the error message for
+ * the field name GHL actually expects and this is a one-line fix,
+ * not a rebuild — same situation we hit with the conversations scope.
+ */
+export async function fetchGhlSocialAccounts(config: GHLConfig) {
+  const res = await fetch(
+    `${GHL_BASE_URL}/social-media-posting/oauth/${config.locationId}/accounts`,
+    { method: "GET", headers: ghlHeaders(config) }
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GHL social accounts fetch failed (${res.status}): ${body}`);
+  }
+  const data = await res.json();
+  return data.accounts || data.results || [];
+}
+
+export async function createGhlSocialPost(
+  config: GHLConfig,
+  accountIds: string[],
+  summary: string,
+  mediaUrls?: string[]
+) {
+  const res = await fetch(`${GHL_BASE_URL}/social-media-posting/${config.locationId}/posts`, {
+    method: "POST",
+    headers: ghlHeaders(config),
+    body: JSON.stringify({
+      accountIds,
+      summary,
+      media: (mediaUrls || []).map((url) => ({ url })),
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GHL create post failed (${res.status}): ${body}`);
+  }
+  return await res.json();
+}
