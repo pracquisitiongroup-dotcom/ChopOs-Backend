@@ -1,0 +1,55 @@
+/**
+ * GET /api/impact-stats
+ * ------------------------------------------------------------------
+ * Powers the dashboard's "Chop's Impact" tracker. Sums every real
+ * logged action for this business, all-time — never resets.
+ *
+ * Response: { totalMinutesSaved, totalHoursSaved, totalDollarValue, actionCount }
+ *
+ * Honest by construction: this only reflects rows in chop_actions_log,
+ * which only get written when a REAL action succeeded (a real SMS
+ * sent, a real GBP post published) — not demo button clicks.
+ * ------------------------------------------------------------------
+ */
+
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { supabase } from "../lib/supabase";
+import { getAuthedBusiness } from "../lib/auth";
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  try {
+    const auth = await getAuthedBusiness(req);
+    if (!auth) return res.status(401).json({ error: "Not authenticated" });
+
+    const { data: rows, error } = await supabase
+      .from("chop_actions_log")
+      .select("minutes_saved, dollar_value")
+      .eq("business_id", auth.businessId);
+
+    if (error) throw error;
+
+    const totals = (rows || []).reduce(
+      (acc, row) => ({
+        minutes: acc.minutes + (row.minutes_saved || 0),
+        dollars: acc.dollars + (Number(row.dollar_value) || 0),
+      }),
+      { minutes: 0, dollars: 0 }
+    );
+
+    return res.status(200).json({
+      totalMinutesSaved: totals.minutes,
+      totalHoursSaved: Math.round((totals.minutes / 60) * 10) / 10, // one decimal place
+      totalDollarValue: totals.dollars,
+      actionCount: (rows || []).length,
+    });
+  } catch (err: any) {
+    console.error("[/api/impact-stats] error:", err);
+    return res.status(500).json({ error: err.message || "Unknown error" });
+  }
+}
