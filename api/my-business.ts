@@ -28,7 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const { data: business, error } = await supabase
       .from("businesses")
-      .select("id, name, industry, phone, website, service_areas")
+      .select("id, name, industry, phone, website, service_areas, ghl_private_token, ghl_location_id")
       .eq("id", auth.businessId)
       .single();
 
@@ -36,7 +36,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ business: null });
     }
 
-    return res.status(200).json({ business });
+    // Never send the actual token to the frontend — only whether one exists.
+    const { ghl_private_token, ghl_location_id, ...safeBusiness } = business;
+    return res.status(200).json({
+      business: { ...safeBusiness, ghlConnected: !!(ghl_private_token && ghl_location_id) },
+    });
   } catch (err: any) {
     console.error("[/api/my-business] error:", err);
     return res.status(500).json({ error: err.message || "Unknown error" });
