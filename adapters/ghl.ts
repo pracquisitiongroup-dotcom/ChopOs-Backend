@@ -161,7 +161,7 @@ export async function fetchGhlOpportunities(
   options?: { limit?: number }
 ) {
   const params = new URLSearchParams({
-    locationId: config.locationId,
+    location_id: config.locationId,
     limit: String(options?.limit ?? 50),
   });
   const res = await fetch(`${GHL_BASE_URL}/opportunities/search?${params.toString()}`, {
