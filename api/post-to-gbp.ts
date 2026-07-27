@@ -62,6 +62,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       const config = await getBusinessGhlConfig(auth.businessId);
       const result = await createGhlSocialPost(config, [accountId], summary, mediaUrls);
+
+      // Log the real impact — best-effort, never blocks the actual response.
+      supabase
+        .from("chop_actions_log")
+        .insert({
+          business_id: auth.businessId,
+          action_type: "gbp_post",
+          minutes_saved: 15, // a defensible estimate: time to write, format, and publish a post by hand
+          dollar_value: null,
+        })
+        .then(({ error }) => {
+          if (error) console.warn("[/api/post-to-gbp] impact log failed:", error);
+        });
+
       return res.status(200).json({ posted: true, result });
     }
 
