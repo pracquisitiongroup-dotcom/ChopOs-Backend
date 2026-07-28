@@ -1,0 +1,55 @@
+/**
+ * /api/services
+ * ------------------------------------------------------------------
+ * GET  -> returns the business's saved services list (or empty array)
+ * PUT  -> replaces the whole list — simplest correct approach for a
+ *         variable-length list the owner adds/removes from freely.
+ *
+ * Body for PUT: { services: [{ name, price, description }, ...] }
+ * ------------------------------------------------------------------
+ */
+
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { supabase } from "../lib/supabase";
+import { getAuthedBusiness } from "../lib/auth";
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, PUT, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  try {
+    const auth = await getAuthedBusiness(req);
+    if (!auth) return res.status(401).json({ error: "Not authenticated" });
+
+    if (req.method === "GET") {
+      const { data, error } = await supabase
+        .from("businesses")
+        .select("services")
+        .eq("id", auth.businessId)
+        .single();
+      if (error) throw error;
+      return res.status(200).json({ services: data?.services || [] });
+    }
+
+    if (req.method === "PUT") {
+      const { services } = req.body || {};
+      if (!Array.isArray(services)) {
+        return res.status(400).json({ error: "Body must include a services array" });
+      }
+      const { error } = await supabase
+        .from("businesses")
+        .update({ services })
+        .eq("id", auth.businessId);
+      if (error) throw error;
+      return res.status(200).json({ saved: true });
+    }
+
+    return res.status(405).json({ error: "Method not allowed" });
+  } catch (err: any) {
+    console.error("[/api/services] error:", err);
+    return res.status(500).json({ error: err.message || "Unknown error" });
+  }
+}
