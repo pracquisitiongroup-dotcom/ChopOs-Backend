@@ -239,3 +239,38 @@ export async function createGhlSocialPost(
   }
   return await res.json();
 }
+
+/**
+ * PIPELINES (resolves real stage names for Opportunities)
+ * ------------------------------------------------------------------
+ * NOTE: the exact query param name isn't confirmed from GHL's plain-
+ * text docs (same situation as opportunities/search before we found
+ * the real one via a live 422 error) — using `location_id` as the
+ * best-informed guess since it's the same "opportunities" resource
+ * family. If this 422s on first real use, the error message will very
+ * likely name the correct field, same one-line fix as last time.
+ */
+export async function fetchGhlPipelines(config: GHLConfig) {
+  const params = new URLSearchParams({ location_id: config.locationId });
+  const res = await fetch(`${GHL_BASE_URL}/opportunities/pipelines?${params.toString()}`, {
+    method: "GET",
+    headers: ghlHeaders(config),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GHL pipelines fetch failed (${res.status}): ${body}`);
+  }
+  const data = await res.json();
+  return data.pipelines || [];
+}
+
+/** Builds a flat { stageId: stageName } map across every pipeline, for resolving opportunity stage IDs into real names. */
+export function buildStageNameMap(pipelines: any[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const pipeline of pipelines) {
+    for (const stage of pipeline.stages || []) {
+      map[stage.id] = stage.name;
+    }
+  }
+  return map;
+}
