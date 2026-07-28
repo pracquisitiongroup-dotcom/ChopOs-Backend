@@ -1,0 +1,117 @@
+/**
+ * /api/files
+ * ------------------------------------------------------------------
+ * Real file upload/list/delete for Brand Assets (Step 6) and
+ * Knowledge Upload (Step 7) in Train Chop. Files are stored in
+ * Supabase Storage (same project, no new service needed); this
+ * endpoint just handles the upload and keeps a record in
+ * business_files.
+ *
+ * POST   -> { category, subcategory?, fileName, fileBase64 } uploads a file
+ * GET    -> ?category=brand_asset|knowledge lists this business's files
+ * DELETE -> ?id=<fileId> removes a file (storage + record)
+ *
+ * NOTE: files are sent as base64 in a JSON body, which is simple but
+ * has real limits — Vercel's request size cap (a few MB on the
+ * Hobby plan) means large videos may fail. Fine for logos, price
+ * sheets, and typical documents; flag to the user if larger uploads
+ * are needed later (would need a different, presigned-upload approach).
+ * ------------------------------------------------------------------
+ */
+
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { supabase } from "../lib/supabase";
+import { getAuthedBusiness } from "../lib/auth";
+
+const BUCKET_NAME = "business-files";
+
+async function ensureBucketExists() {
+  const { data: buckets } = await supabase.storage.listBuckets();
+  const exists = (buckets || []).some((b) => b.name === BUCKET_NAME);
+  if (!exists) {
+    await supabase.storage.createBucket(BUCKET_NAME, { public: true });
+  }
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(204).end();
+
+  try {
+    const auth = await getAuthedBusiness(req);
+    if (!auth) return res.status(401).json({ error: "Not authenticated" });
+
+    if (req.method === "GET") {
+      const category = req.query.category as string | undefined;
+      let query = supabase.from("business_files").select("*").eq("business_id", auth.businessId);
+      if (category) query = query.eq("category", category);
+      const { data, error } = await query.order("uploaded_at", { ascending: false });
+      if (error) throw error;
+      return res.status(200).json({ files: data || [] });
+    }
+
+    if (req.method === "POST") {
+      const { category, subcategory, fileName, fileBase64 } = req.body || {};
+      if (!category || !fileName || !fileBase64) {
+        return res.status(400).json({ error: "Body must include category, fileName, and fileBase64" });
+      }
+
+      await ensureBucketExists();
+
+      const buffer = Buffer.from(fileBase64, "base64");
+      const storagePath = `${auth.businessId}/${category}/${Date.now()}-${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(BUCKET_NAME)
+        .upload(storagePath, buffer, { upsert: false });
+      if (uploadError) throw uploadError;
+
+      const { data: urlData } = supabase.storage.from(BUCKET_NAME).getPublicUrl(storagePath);
+
+      const { data: fileRecord, error: insertError } = await supabase
+        .from("business_files")
+        .insert({
+          business_id: auth.businessId,
+          category,
+          subcategory: subcategory || null,
+          file_name: fileName,
+          storage_path: storagePath,
+          file_url: urlData?.publicUrl || null,
+        })
+        .select()
+        .single();
+      if (insertError) throw insertError;
+
+      return res.status(200).json({ file: fileRecord });
+    }
+
+    if (req.method === "DELETE") {
+      const fileId = req.query.id as string | undefined;
+      if (!fileId) return res.status(400).json({ error: "Query must include id" });
+
+      const { data: fileRecord, error: fetchError } = await supabase
+        .from("business_files")
+        .select("storage_path, business_id")
+        .eq("id", fileId)
+        .single();
+      if (fetchError || !fileRecord) return res.status(404).json({ error: "File not found" });
+      if (fileRecord.business_id !== auth.businessId) {
+        return res.status(403).json({ error: "Not your file" });
+      }
+
+      await supabase.storage.from(BUCKET_NAME).remove([fileRecord.storage_path]);
+      const { error: deleteError } = await supabase.from("business_files").delete().eq("id", fileId);
+      if (deleteError) throw deleteError;
+
+      return res.status(200).json({ deleted: true });
+    }
+
+    return res.status(405).json({ error: "Method not allowed" });
+  } catch (err: any) {
+    console.error("[/api/files] error:", err);
+    return res.status(500).json({ error: err.message || "Unknown error" });
+  }
+}
