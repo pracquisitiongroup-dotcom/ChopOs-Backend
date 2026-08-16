@@ -1,10 +1,14 @@
 /**
  * GET /api/impact-stats
  * ------------------------------------------------------------------
- * Powers the dashboard's "Chop's Impact" tracker. Sums every real
- * logged action for this business, all-time — never resets.
+ * Powers the dashboard's "Chop's Impact" tracker AND the Win Back
+ * Guests page's "Revenue Recovered" counter. Sums every real logged
+ * action for this business.
  *
- * Response: { totalMinutesSaved, totalHoursSaved, totalDollarValue, actionCount }
+ * Response: {
+ *   totalMinutesSaved, totalHoursSaved, totalDollarValue, actionCount,
+ *   winback: { thisMonthDollarValue, allTimeDollarValue, allTimeCount }
+ * }
  *
  * Honest by construction: this only reflects rows in chop_actions_log,
  * which only get written when a REAL action succeeded (a real SMS
@@ -29,7 +33,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const { data: rows, error } = await supabase
       .from("chop_actions_log")
-      .select("minutes_saved, dollar_value")
+      .select("minutes_saved, dollar_value, action_type, created_at")
       .eq("business_id", auth.businessId);
 
     if (error) throw error;
@@ -42,11 +46,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       { minutes: 0, dollars: 0 }
     );
 
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const winbackRows = (rows || []).filter((r) => r.action_type === "winback_sent");
+    const winbackThisMonth = winbackRows
+      .filter((r) => new Date(r.created_at) >= monthStart)
+      .reduce((sum, r) => sum + (Number(r.dollar_value) || 0), 0);
+    const winbackAllTime = winbackRows.reduce((sum, r) => sum + (Number(r.dollar_value) || 0), 0);
+
     return res.status(200).json({
       totalMinutesSaved: totals.minutes,
       totalHoursSaved: Math.round((totals.minutes / 60) * 10) / 10, // one decimal place
       totalDollarValue: totals.dollars,
       actionCount: (rows || []).length,
+      winback: {
+        thisMonthDollarValue: winbackThisMonth,
+        allTimeDollarValue: winbackAllTime,
+        allTimeCount: winbackRows.length,
+      },
     });
   } catch (err: any) {
     console.error("[/api/impact-stats] error:", err);
