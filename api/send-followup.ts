@@ -6,13 +6,17 @@
  * the old shared ACTION_SECRET password is retired now that real
  * per-user login exists.
  *
- * Body: { "contactId": "wLFXrbz5bg7RptiTb3Hr", "message": "Hi ...", "estimatedValue"?: 2450 }
+ * Body: { "contactId": "wLFXrbz5bg7RptiTb3Hr", "message": "Hi ...", "estimatedValue"?: 2450, "actionType"?: "winback_sent" }
  *
  * `estimatedValue` is optional — if the frontend has it (from the
  * lead's GHL data), it gets logged to chop_actions_log as "pipeline
  * value touched by this follow-up." This is NOT a claim that Chop
  * caused a sale — just an honest record of what was in play when the
  * action happened, for the impact tracker on the dashboard.
+ *
+ * `actionType` defaults to "follow_up_sent" — pass "winback_sent" when
+ * this call is a guest win-back message specifically, so it can be
+ * tracked and reported on separately (see /api/impact-stats).
  * ------------------------------------------------------------------
  */
 
@@ -20,6 +24,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { sendGhlSms } from "../adapters/ghl";
 import { getAuthedBusiness } from "../lib/auth";
 import { supabase } from "../lib/supabase";
+
+const ALLOWED_ACTION_TYPES = new Set(["follow_up_sent", "winback_sent"]);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
@@ -34,10 +40,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const auth = await getAuthedBusiness(req);
     if (!auth) return res.status(401).json({ error: "Not authenticated" });
 
-    const { contactId, message, estimatedValue } = req.body || {};
+    const { contactId, message, estimatedValue, actionType } = req.body || {};
     if (!contactId || !message) {
       return res.status(400).json({ error: "Body must include contactId and message" });
     }
+    const resolvedActionType = ALLOWED_ACTION_TYPES.has(actionType) ? actionType : "follow_up_sent";
 
     const { data: business, error: bizError } = await supabase
       .from("businesses")
@@ -62,7 +69,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .from("chop_actions_log")
       .insert({
         business_id: auth.businessId,
-        action_type: "follow_up_sent",
+        action_type: resolvedActionType,
         minutes_saved: 5, // a defensible estimate: time to look up, compose, and send a personalized text by hand
         dollar_value: typeof estimatedValue === "number" ? estimatedValue : null,
       })
